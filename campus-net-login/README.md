@@ -15,7 +15,7 @@
 | 自动适配 | 自动识别认证系统类型，填入账号密码提交，并复检确认 |
 | 结果三态 | 区分「登录成功 / 登录失败（密码错误等）/ 需要重新登录（被顶下线）」 |
 | 开机自启 | 一键启用/禁用，写当前用户注册表，**免管理员权限** |
-| 无人值守 | 开机后自动等网络、自动重试，失败会持续重连而不是放弃 |
+| 无人值守 | 开机自动等网络、自动重试，**全程不弹窗口**，登录完成即退出，不留后台进程 |
 | 控制面板 | 连接 / 断开 / 设置账号 / 自启开关 / 查看日志 / 探测认证页 |
 | 异常可见 | 网络不通、字段变化、超时、认证失败都有明确原因，全部写入日志 |
 | 日志脱敏 | 写盘前自动把口令字段替换成 `***` |
@@ -145,7 +145,7 @@ campus-net-login/
 | `delay` | 5 | 开机后延迟几秒开始登录 |
 | `hard_retry_seconds` | 900 | 开机后最长坚持重试多久（秒） |
 | `hard_retry_interval` | 15 | 每轮重试间隔（秒） |
-| `args` | `--startup` | 自启参数，可改 `--silent` 走无窗口后台 |
+| `args` | `--silent` | 自启参数。**默认无窗口**，开机静默登录后退出；改成 `--startup` 则开机弹出最小化窗口并常驻守护 |
 
 ### advanced — 其他
 
@@ -244,10 +244,18 @@ GET http://<门户IP>:801/eportal/portal/login
 HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run   项名：CampusNetAutoLogin
 ```
 
-开机后的行为：先等链路就绪（最长 `startup_wait` 秒，判据是**网卡拿到 IP**
-而非 DNS 能解析——开机时 DNS 往往还没起来），再延迟 `delay` 秒登录；
-失败不会放弃，而是每 `hard_retry_interval` 秒重试一次，直到成功或超过
-`hard_retry_seconds`。唯一例外是明确报错（如密码错误）会立即停手，避免把账号试锁。
+开机后的行为（默认 `--silent`，**全程不弹任何窗口**）：
+
+1. 先等链路就绪（最长 `startup_wait` 秒）。判据是**网卡拿到 IP** 而非 DNS 能解析——
+   开机时 DNS 往往还没起来，按域名判会被误判成"网络不通"；
+2. 延迟 `delay` 秒后开始登录；失败不放弃，每 `hard_retry_interval` 秒再来一轮，
+   直到成功或超过 `hard_retry_seconds`；
+3. 登录成功即**退出，不留后台进程**。
+
+唯一的例外是明确报错（如密码错误）会立即停手，避免连续错误把账号试锁。
+
+> 想让它在后台一直待命、掉线自动重连？把 `autostart.args` 改成 `--silent --watch`
+> —— 同样无窗口，代价是任务管理器里会长期看到一个进程（约 40MB 内存）。
 
 **查看当前状态（三种方式）**
 
@@ -262,8 +270,9 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run   项名：Campu
 
 ```bash
 python campus_login.py                     # 图形控制面板（默认）
-python campus_login.py --startup           # 开机自启模式：自动登录 + 最小化 + 断线重连
-python campus_login.py --silent            # 无窗口后台守护，只写日志
+python campus_login.py --silent            # 无窗口静默登录，完成后退出（开机自启默认用它）
+python campus_login.py --silent --watch    # 无窗口 + 常驻后台，掉线自动重连
+python campus_login.py --startup           # 开机自启（界面版）：自动登录 + 最小化窗口
 python campus_login.py --connect           # 登录一次后退出
 python campus_login.py --connect --force   # 即使已在线也强制重登
 python campus_login.py --status            # 打印当前联网状态

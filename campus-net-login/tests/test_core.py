@@ -834,5 +834,111 @@ class TestStartupFlow(unittest.TestCase):
         self.assertGreaterEqual(au["hard_retry_seconds"], 300, "要坚持足够久才放弃")
 
 
+class TestBootModes(unittest.TestCase):
+    """开机静默模式：无窗口、登录完就退出、失败持续重试。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="cnl_boot_")
+        self._orig_data_dir = C.data_dir
+        self._orig_logger = C._logger
+        C.data_dir = lambda: self.tmp
+        C._logger = None
+        self.logger = C.setup_logging()
+
+    def tearDown(self):
+        C.data_dir = self._orig_data_dir
+        C._logger = self._orig_logger
+
+    def _cfg(self):
+        cfg = C.default_config()
+        cfg["autostart"]["delay"] = 0
+        cfg["autostart"]["hard_retry_seconds"] = 20
+        cfg["autostart"]["hard_retry_interval"] = 1
+        cfg["network"]["startup_wait"] = 1
+        return cfg
+
+    def test_default_autostart_is_windowless(self):
+        """开机自启默认必须走无窗口的 --silent，而不是会弹窗口的 --startup。"""
+        self.assertEqual(C.default_config()["autostart"]["args"], "--silent")
+        self.assertIn("--silent", C.launch_command())
+        self.assertNotIn("--startup", C.launch_command())
+
+    def test_boot_login_returns_immediately_on_success(self):
+        cfg = self._cfg()
+        calls = []
+        ok = C.ConnectResult(True, C.LoginOutcome.OK, "ok")
+        with mock.patch.object(C, "wait_for_network", lambda *a, **k: True), \
+                mock.patch.object(C, "connect",
+                                  lambda c, l, force=False: (calls.append(1), ok)[1]):
+            r = C.boot_login(cfg, self.logger)
+        self.assertTrue(r.ok)
+        self.assertEqual(len(calls), 1, "成功即返回，不该再尝试第二轮")
+
+    def test_boot_login_gives_up_on_wrong_password(self):
+        """明确失败（密码错误）必须立即停手，避免把账号试锁。"""
+        cfg = self._cfg()
+        calls = []
+        bad = C.ConnectResult(False, C.LoginOutcome.FAILED, "密码错误")
+        with mock.patch.object(C, "wait_for_network", lambda *a, **k: True), \
+                mock.patch.object(C, "connect",
+                                  lambda c, l, force=False: (calls.append(1), bad)[1]):
+            r = C.boot_login(cfg, self.logger)
+        self.assertFalse(r.ok)
+        self.assertEqual(len(calls), 1, "密码错误不应重试")
+
+    def test_boot_login_keeps_retrying_until_deadline(self):
+        """可重试的失败（如未认证）应反复重试，而不是试一次就放弃。"""
+        cfg = self._cfg()
+        cfg["autostart"]["hard_retry_seconds"] = 2
+        cfg["autostart"]["hard_retry_interval"] = 0.2
+        calls = []
+        retry = C.ConnectResult(False, C.LoginOutcome.RETRY, "未认证")
+        with mock.patch.object(C, "wait_for_network", lambda *a, **k: True), \
+                mock.patch.object(C, "connect",
+                                  lambda c, l, force=False: (calls.append(1), retry)[1]):
+            C.boot_login(cfg, self.logger)
+        self.assertGreaterEqual(len(calls), 2, "应至少重试一次")
+
+    def test_run_silent_exits_without_daemon(self):
+        """watch=False：登录完必须直接返回，不留后台进程。"""
+        cfg = self._cfg()
+        ok = C.ConnectResult(True, C.LoginOutcome.OK, "ok")
+        with mock.patch.object(C, "wait_for_network", lambda *a, **k: True), \
+                mock.patch.object(C, "connect", lambda c, l, force=False: ok), \
+                mock.patch.object(C, "check_network",
+                                  side_effect=AssertionError("不该进入守护循环")):
+            rc = C.run_silent(cfg, self.logger, watch=False)
+        self.assertEqual(rc, 0)
+
+    def test_run_silent_never_daemonizes_after_failure(self):
+        """登录失败时也不能进入守护循环（否则进程会一直赖着不走）。"""
+        cfg = self._cfg()
+        bad = C.ConnectResult(False, C.LoginOutcome.FAILED, "密码错误")
+        with mock.patch.object(C, "wait_for_network", lambda *a, **k: True), \
+                mock.patch.object(C, "connect", lambda c, l, force=False: bad), \
+                mock.patch.object(C, "check_network",
+                                  side_effect=AssertionError("不该进入守护循环")):
+            rc = C.run_silent(cfg, self.logger, watch=True)
+        self.assertEqual(rc, 1)
+
+    def test_run_silent_watch_enters_daemon(self):
+        """watch=True（手动指定）才进入常驻守护。"""
+        cfg = self._cfg()
+        ok = C.ConnectResult(True, C.LoginOutcome.OK, "ok")
+        seen = []
+
+        def fake_check(c, quick=False):
+            seen.append(1)
+            raise KeyboardInterrupt       # 打断 while True，避免测试卡住
+
+        with mock.patch.object(C, "wait_for_network", lambda *a, **k: True), \
+                mock.patch.object(C, "connect", lambda c, l, force=False: ok), \
+                mock.patch.object(C, "check_network", fake_check), \
+                mock.patch.object(C.time, "sleep", lambda *a, **k: None):
+            with self.assertRaises(KeyboardInterrupt):
+                C.run_silent(cfg, self.logger, watch=True)
+        self.assertTrue(seen, "watch=True 应进入守护循环")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

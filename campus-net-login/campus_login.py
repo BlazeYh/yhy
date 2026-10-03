@@ -293,7 +293,7 @@ DEFAULT_CONFIG = {
     "autostart": {
         "enabled": False,
         "delay": 5,               # 开机后多久开始尝试（秒）—— 抢时间，别让用户等
-        "args": "--startup",
+        "args": "--silent",
         "hard_retry_seconds": 900,  # 开机后最长坚持多久（秒）；期间反复重试直到联网
         "hard_retry_interval": 15   # 每轮失败后的间隔（秒）
     },
@@ -2008,7 +2008,7 @@ def _pythonw() -> str:
     return exe
 
 
-def launch_command(args: str = "--startup") -> str:
+def launch_command(args: str = "--silent") -> str:
     """生成注册表里要写的完整启动命令。"""
     if IS_FROZEN:
         base = f'"{sys.executable}"'
@@ -2032,7 +2032,7 @@ def autostart_get() -> str | None:
         return None
 
 
-def autostart_enable(args: str = "--startup") -> tuple:
+def autostart_enable(args: str = "--silent") -> tuple:
     if not IS_WINDOWS:
         return False, "当前系统不是 Windows，注册表方式不可用"
     import winreg
@@ -2267,7 +2267,9 @@ def cli(argv=None) -> int:
     parser.add_argument("--startup", action="store_true",
                         help="开机自启模式：自动连接并最小化窗口，附带断线重连")
     parser.add_argument("--silent", action="store_true",
-                        help="无窗口后台模式，仅写日志")
+                        help="无窗口静默模式：登录一次后退出（开机自启默认用它）")
+    parser.add_argument("--watch", action="store_true",
+                        help="配合 --silent：登录后继续常驻后台，掉线自动重连")
     parser.add_argument("--connect", action="store_true", help="执行一次登录并退出")
     parser.add_argument("--force", action="store_true", help="即使已在线也强制重新登录")
     parser.add_argument("--status", action="store_true", help="打印当前联网状态")
@@ -2300,7 +2302,7 @@ def cli(argv=None) -> int:
 
     if args.autostart:
         if args.autostart == "on":
-            ok, info = autostart_enable(cfg.get("autostart", {}).get("args", "--startup"))
+            ok, info = autostart_enable(cfg.get("autostart", {}).get("args", "--silent"))
             print(("已启用开机自启动：\n  " + info) if ok else f"启用失败：{info}")
             if ok:
                 cfg.setdefault("autostart", {})["enabled"] = True
@@ -2343,19 +2345,93 @@ def cli(argv=None) -> int:
         return 0 if r.ok else 1
 
     if args.silent:
-        return run_silent(cfg, logger)
+        return run_silent(cfg, logger, watch=args.watch)
 
     # ---- 默认：图形界面 ----
     return run_gui(cfg, logger, startup=args.startup)
 
 
-def run_silent(cfg: dict, logger) -> int:
-    """无窗口后台守护：等待网络 → 登录 → 周期性检查，掉线自动重连。"""
-    logger.info("=== 后台守护模式启动 ===")
-    wait_for_network(cfg, logger)
-    r = connect(cfg, logger)
-    logger.info("首次登录结果：%s", r.message)
+def boot_login(cfg: dict, logger, should_stop=None, on_result=None):
+    """
+    开机登录：一开机就抢，失败就反复重试，直到成功或超时。全程无窗口。
+
+    校园网的认证页跳转时快时慢，开机阶段 DNS / 网卡也常常还没就绪，
+    所以这里不做"一次性尝试"，而是**持续缠斗**：
+    每轮「等链路 → 登录」，失败就隔一会儿再来，直到成功或超出时限。
+    唯一例外是明确失败（如密码错误）会立刻停手，避免把账号试锁。
+
+    should_stop: 可选回调，返回 True 时提前中止（界面关闭时用）
+    on_result:   可选回调，每轮结果回传（界面刷新状态用）
+    """
+    au = cfg.get("autostart", {})
+    delay = int(au.get("delay", 5))
+    hard = float(au.get("hard_retry_seconds", 900))
+    gap = float(au.get("hard_retry_interval", 15))
+    boot_wait = float(cfg.get("network", {}).get("startup_wait", 180))
+    stop = should_stop or (lambda: False)
+
+    logger.info("开机登录：延迟 %d 秒开始，最长坚持 %d 秒", delay, int(hard))
+
+    waited = 0.0                                  # 延迟阶段（可被中断）
+    while waited < delay and not stop():
+        time.sleep(min(1.0, delay - waited))
+        waited += 1.0
+
+    deadline = time.time() + hard
+    attempt, last = 0, None
+    while not stop() and time.time() < deadline:
+        attempt += 1
+        # 首轮给足等待时间；后续轮网络已大致就绪，只需短等
+        wait_cap = boot_wait if attempt == 1 else 20.0
+        if not wait_for_network(cfg, logger, max_wait=wait_cap):
+            logger.warning("链路等待超时（第 %d 轮），仍然尝试登录一次", attempt)
+        res = connect(cfg, logger)
+        last = res
+        if on_result:
+            try:
+                on_result(res)
+            except Exception:
+                pass
+        if res.ok:
+            logger.info("开机自动登录完成（第 %d 轮，耗时 %.1f 秒）",
+                        attempt, res.elapsed)
+            return res
+        if res.verdict == LoginOutcome.FAILED:
+            logger.error("开机自动登录明确失败，停止重试：%s", res.message)
+            return res
+        remain = int(deadline - time.time())
+        if remain <= 0:
+            break
+        wait = min(gap, remain)
+        logger.warning("第 %d 轮未成功（%s），%d 秒后重试（剩余 %d 秒）",
+                       attempt, res.message, int(wait), remain)
+        tick = time.time()                        # 间隔等待（可被中断）
+        while time.time() - tick < wait and not stop():
+            time.sleep(0.5)
+
+    logger.error("开机自动登录在 %d 秒内未成功，已停止重试", int(hard))
+    if last is not None:
+        return last
+    return ConnectResult(False, LoginOutcome.OFFLINE, "开机后网络长时间未就绪",
+                         check_network(cfg, quick=True))
+
+
+def run_silent(cfg: dict, logger, watch: bool = False) -> int:
+    """
+    无窗口静默模式。
+
+    watch=False（默认，开机自启用）：登录完成后立即退出，不留后台进程。
+    watch=True：继续常驻后台，周期性检查，掉线自动重连。
+    """
+    logger.info("=== 静默模式启动（%s）===", "常驻守护" if watch else "登录后退出")
+    r = boot_login(cfg, logger)
+
+    if not watch or not r.ok:
+        logger.info("静默模式结束：%s", r.message)
+        return 0 if r.ok else 1
+
     interval = int(cfg.get("network", {}).get("watch_interval", 45))
+    logger.info("进入后台守护，每 %d 秒检查一次", interval)
     while True:
         time.sleep(interval)
         st = check_network(cfg, quick=True)
@@ -2854,53 +2930,18 @@ class App:
     # ---------- 各操作 ----------
 
     def _auto_start(self):
-        """
-        开机自启模式：一开机就抢着登录，失败就反复重试，直到联网成功。
-
-        校园网的认证页跳转时快时慢，开机阶段 DNS / 网卡也常常还没就绪，
-        所以这里不做"一次性尝试"，而是**持续缠斗**：
-        每轮「等链路 → 登录」，失败就隔一会儿再来，直到成功或超出时限。
-        """
+        """开机自启（界面版）：直接复用 boot_login，与静默模式同一套逻辑。"""
         self.watch_sw.set(True)
         self.watching = True
-        au = self.cfg.get("autostart", {})
-        delay = int(au.get("delay", 5))
-        hard = float(au.get("hard_retry_seconds", 900))
-        gap = float(au.get("hard_retry_interval", 15))
-        boot_wait = float(self.cfg.get("network", {}).get("startup_wait", 180))
+        delay = int(self.cfg.get("autostart", {}).get("delay", 5))
         self.hint(f"开机自启：{delay} 秒后开始自动登录（失败会自动重试）…")
-        self.logger.info("开机自启流程启动：延迟 %d 秒，最长坚持 %d 秒", delay, int(hard))
 
-        def wait_and_go():
-            time.sleep(delay)
-            deadline = time.time() + hard
-            attempt = 0
-            while not self._closing and time.time() < deadline:
-                attempt += 1
-                # 首轮给足等待时间；后续轮网络已大致就绪，只需短等
-                wait_cap = boot_wait if attempt == 1 else 20.0
-                if not wait_for_network(self.cfg, self.logger, max_wait=wait_cap):
-                    self.logger.warning("链路等待超时（第 %d 轮），仍然尝试登录一次", attempt)
-                res = connect(self.cfg, self.logger)
-                self.q.put(("done", res))
-                if res.ok:
-                    self.logger.info("开机自动登录完成（第 %d 轮，耗时 %.1f 秒）",
-                                     attempt, res.elapsed)
-                    return
-                if res.verdict == LoginOutcome.FAILED:
-                    # 明确失败（如密码错误）不硬刚，避免连续错误把账号锁掉
-                    self.logger.error("开机自动登录明确失败，停止重试：%s", res.message)
-                    return
-                remain = int(deadline - time.time())
-                if remain <= 0:
-                    break
-                wait = min(gap, remain)
-                self.logger.warning("第 %d 轮未成功（%s），%d 秒后重试（剩余 %d 秒）",
-                                    attempt, res.message, int(wait), remain)
-                time.sleep(wait)
-            self.logger.error("开机自动登录在 %d 秒内未成功，已停止重试", int(hard))
+        def worker():
+            boot_login(self.cfg, self.logger,
+                       should_stop=lambda: self._closing,
+                       on_result=lambda res: self.q.put(("done", res)))
 
-        threading.Thread(target=wait_and_go, daemon=True).start()
+        threading.Thread(target=worker, daemon=True).start()
 
     def do_connect(self):
         self.hint("正在连接…")
@@ -2963,7 +3004,7 @@ class App:
 
     def on_switch_autostart(self, on):
         if on:
-            ok, info = autostart_enable(self.cfg.get("autostart", {}).get("args", "--startup"))
+            ok, info = autostart_enable(self.cfg.get("autostart", {}).get("args", "--silent"))
             if ok:
                 self.cfg.setdefault("autostart", {})["enabled"] = True
                 save_config(self.cfg)
