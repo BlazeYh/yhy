@@ -46,7 +46,7 @@ LOGIN_PAGE = """<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>校园网认证 - 某高校</title>
+<title>校园网认证</title>
 </head>
 <body>
 <div class="wrap">

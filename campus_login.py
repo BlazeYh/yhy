@@ -1950,7 +1950,7 @@ def _has_local_ip() -> bool:
     但网卡其实已经拿到 IP、只是解析不了域名。用 UDP connect 选路就能读到本机地址
     （UDP 不会真的发包，只是为了触发一次路由选择）。
     """
-    for target in ("10.0.0.1", "223.5.5.5"):
+    for target in ("223.5.5.5", "114.114.114.114"):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                 s.settimeout(1.0)
