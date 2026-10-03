@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "_说明": "校园网登录配置模板。复制为 config.json 后填写，或直接运行程序用界面/命令行设置。密码请勿手写明文，用 --set-account 或界面设置，程序会自动加密写入 password_enc。",
+
+  "auth": {
+    "login_url": "http://在这里填校园网登录网址/",
+    "username": "在这里填学号或上网账号",
+    "password_enc": "（留空，由程序加密写入）",
+
+    "adapter": "auto",
+
+    "logout_url": "",
+    "encoding": "utf-8",
+
+    "custom": {
+      "method": "POST",
+      "url": "",
+      "params": {
+        "username": "{username}",
+        "password": "{password}"
+      },
+      "headers": {},
+      "success_keywords": [],
+      "failure_keywords": []
+    }
+  },
+
+  "network": {
+    "probes": [
+      ["http://www.msftconnecttest.com/connecttest.txt", "Microsoft Connect Test"],
+      ["http://connect.rom.miui.com/generate_204", ""]
+    ],
+    "timeout": 8,
+    "retry": 3,
+    "retry_interval": 6,
+    "startup_wait": 180,
+    "watch_interval": 45
+  },
+
+  "autostart": {
+    "enabled": false,
+    "delay": 5,
+    "args": "--startup",
+    "hard_retry_seconds": 900,
+    "hard_retry_interval": 15
+  },
+
+  "advanced": {
+    "verify_by_recheck": true,
+    "open_login_page_on_failure": false
+  }
+}
