@@ -682,7 +682,8 @@ class _FakeDrcomSession:
     def get(self, url, headers=None):
         type(self).calls.append(("GET", url))
         if "/a41.js" in url:
-            return C.HttpResult(status=200, body="// a41.js", final_url=url)
+            # 真实门户的 a41.js 里就带着 program_index（即 page.name）与登录接口
+            return C.HttpResult(status=200, body=DRCOM_APP_JS, final_url=url)
         if "a40.js" in url:
             return C.HttpResult(status=200, body=DRCOM_APP_JS, final_url=url)
         if "portal/login" in url:                  # 登录接口 GET：不返回成功标志
@@ -758,6 +759,34 @@ class TestDrcomAdapter(unittest.TestCase):
                         "必须按 a41.js 的流程调用 page/loadConfig")
         self.assertTrue(any("program_index=FFI0NB1658374298" in u for u in gets),
                         "program_index 应从脚本里解析得到")
+
+    def test_slim_path_sends_far_fewer_requests(self):
+        """
+        回归（2026-10-06 用户反馈"校园网连接响应变慢"）：
+        日常登录必须走精简路径。此前把当初逆向接口用的侦察动作（探端口、抓 a40.js、
+        抓页面模板）也留在了主流程里 —— 实测一次登录要发 16 个请求，其中 10 个是 404。
+        """
+        _FakeDrcomSession.calls = []
+        with mock.patch.object(C, "HttpSession", _FakeDrcomSession), \
+                mock.patch.object(C, "_port_open", lambda h, p, timeout=2.0: True):
+            C._login_drcom("http://10.0.0.1/", "2024001", "pw", 3, "utf-8",
+                           self.logger)                 # diagnose 默认 False
+        urls = [c[1] for c in _FakeDrcomSession.calls if c[0] == "GET"]
+        self.assertLessEqual(len(urls), 5,
+                             f"精简路径应只发 4~5 个请求，实际 {len(urls)} 个：{urls}")
+        self.assertFalse(any("a40.js" in u for u in urls), "不该再抓 a40.js")
+        self.assertFalse(any("pageAsset" in u for u in urls), "不该再抓前端资源")
+        self.assertFalse(any("extern/" in u for u in urls), "不该再抓页面模板")
+
+    def test_diagnose_mode_still_collects_evidence(self):
+        """diagnose=True 时必须保留完整侦察，否则以后排障拿不到材料。"""
+        _FakeDrcomSession.calls = []
+        with mock.patch.object(C, "HttpSession", _FakeDrcomSession), \
+                mock.patch.object(C, "_port_open", lambda h, p, timeout=2.0: True):
+            C._login_drcom("http://10.0.0.1/", "2024001", "pw", 3, "utf-8",
+                           self.logger, diagnose=True)
+        urls = [c[1] for c in _FakeDrcomSession.calls if c[0] == "GET"]
+        self.assertGreater(len(urls), 5, "诊断模式应抓取更多材料以便排障")
 
     def test_fail_marker_detected(self):
         _FakeDrcomSession.login_body = "<!--Dr.COMWebLoginID_2.htm-->"

@@ -292,7 +292,7 @@ DEFAULT_CONFIG = {
 
     "autostart": {
         "enabled": False,
-        "delay": 5,               # 开机后多久开始尝试（秒）—— 抢时间，别让用户等
+        "delay": 2,               # 开机后多久开始尝试（秒）—— 抢时间，别让用户等
         "args": "--silent",
         "hard_retry_seconds": 900,  # 开机后最长坚持多久（秒）；期间反复重试直到联网
         "hard_retry_interval": 15   # 每轮失败后的间隔（秒）
@@ -300,7 +300,8 @@ DEFAULT_CONFIG = {
 
     "advanced": {
         "verify_by_recheck": True,
-        "open_login_page_on_failure": False
+        "open_login_page_on_failure": False,
+        "diagnose": False
     }
 }
 
@@ -1281,12 +1282,13 @@ def _parse_portal_js_config(html: str) -> dict:
     return cfg
 
 
-def _fetch_page_scripts(sess, base: str, html: str, logger) -> dict:
+def _fetch_page_scripts(sess, base: str, html: str, logger, save: bool = True) -> dict:
     """
-    把门户页引用的外部脚本拉下来存盘。
+    把门户页引用的外部脚本拉下来。
 
-    登录参数怎么拼、要不要额外字段，全在页面引用的 JS 里（本机是 a41.js），
-    存下来才有据可查，不至于靠猜。
+    登录参数怎么拼、要不要额外字段，全在页面引用的 JS 里（本例是 a41.js）。
+    日常登录只需要脚本**内容**（用来取 program_index），
+    只有排障时才需要 save=True 落盘留档。
     """
     saved: dict = {}
     for m in re.finditer(r"""<script[^>]*\bsrc\s*=\s*["']([^"']+)["']""", html or "", re.I):
@@ -1303,17 +1305,15 @@ def _fetch_page_scripts(sess, base: str, html: str, logger) -> dict:
             logger.debug("脚本拉取失败：%s（%s）", url, r.error)
             continue
         name = os.path.basename(src.split("?")[0]) or "asset.js"
-        try:
-            path = os.path.join(data_dir(), "logs", name)
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8", errors="replace") as f:
-                f.write(r.body or "")
-            logger.debug("已保存页面脚本：%s（%d 字符）", path, len(r.body or ""))
-        except OSError as e:
-            logger.debug("脚本存盘失败：%s", e)
-        hint = _interface_hint(r.body or "")
-        if hint:
-            logger.info("脚本 %s 里的接口线索：%s", name, hint[:15])
+        if save:
+            try:
+                path = os.path.join(data_dir(), "logs", name)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="utf-8", errors="replace") as f:
+                    f.write(r.body or "")
+                logger.debug("已保存页面脚本：%s（%d 字符）", path, len(r.body or ""))
+            except OSError as e:
+                logger.debug("脚本存盘失败：%s", e)
         saved[name] = r.body or ""
     return saved
 
@@ -1402,7 +1402,8 @@ def _port_open(host: str, port: int, timeout: float = 2.0) -> bool:
         return False
 
 
-def _login_drcom(portal_url, username, password, timeout, enc, logger) -> tuple:
+def _login_drcom(portal_url, username, password, timeout, enc, logger,
+                 diagnose: bool = False) -> tuple:
     """
     Dr.COM（城市热点）Web 认证。
 
@@ -1413,6 +1414,11 @@ def _login_drcom(portal_url, username, password, timeout, enc, logger) -> tuple:
       · 成功与否看页面名 Dr.COMWebLoginID_3 / _2
 
     以上取值全部从门户页的内嵌脚本里读，读不到才退回默认。
+
+    diagnose=False（默认）走**精简路径**，只发「门户页 → a41.js → loadConfig → 登录」。
+    diagnose=True 时才额外去探端口、抓 a40.js / 页面模板并落盘 —— 那些是当初
+    用来逆向接口的侦察动作，日常登录只会拖慢速度（实测请求数会从 4 个涨到 16 个，
+    其中 10 个是 404）。
     """
     base = _url_base(portal_url)
     if not base:
@@ -1426,16 +1432,19 @@ def _login_drcom(portal_url, username, password, timeout, enc, logger) -> tuple:
     final_url = page.final_url or portal_url
     logger.debug("门户入口：%s → HTTP %s，最终地址 %s", portal_url, page.status, final_url)
 
-    try:
-        dump = os.path.join(data_dir(), "logs", "portal_page.html")
-        os.makedirs(os.path.dirname(dump), exist_ok=True)
-        with open(dump, "w", encoding="utf-8") as f:
-            f.write(page.body or "")
-        logger.debug("门户页原文已保存：%s（%d 字符）", dump, len(page.body or ""))
-    except OSError as e:
-        logger.debug("门户页落盘失败：%s", e)
+    if diagnose:
+        try:
+            dump = os.path.join(data_dir(), "logs", "portal_page.html")
+            os.makedirs(os.path.dirname(dump), exist_ok=True)
+            with open(dump, "w", encoding="utf-8") as f:
+                f.write(page.body or "")
+            logger.debug("门户页原文已保存：%s（%d 字符）", dump, len(page.body or ""))
+        except OSError as e:
+            logger.debug("门户页落盘失败：%s", e)
     scripts: dict = {}
-    scripts.update(_fetch_page_scripts(sess, base, page.body or "", logger))
+    # a41.js 里写着 program_index，登录要用，这一步不能省
+    scripts.update(_fetch_page_scripts(sess, base, page.body or "", logger,
+                                       save=diagnose))
 
     pc = _parse_portal_js_config(page.body or "")
     logger.info("门户声明的认证配置：%s", {k: pc[k] for k in sorted(pc)} or "(未解析到)")
@@ -1451,43 +1460,48 @@ def _login_drcom(portal_url, username, password, timeout, enc, logger) -> tuple:
     fail_mark = re.sub(r"\.htm$", "", pc.get("authfail") or "Dr.COMWebLoginID_2.htm",
                        flags=re.I)
 
-    # 实测：801 端口是 nginx 托管的 "EPortal" 单页应用（真正的认证前端），
-    #       80 端口是 DrcomServer1.0 的老接口 —— 两个端口上不是同一套系统。
-    # a41.js 里写明真实接口前缀是  http://<host>:801/eportal/portal/
-    # 而登录动作在压缩功能脚本 a40.js 里（isJSMin=1 时加载的就是它）。
-    for p in dict.fromkeys([login_port, 80]):
-        if not _port_open(host, p):
-            continue
-        idx = sess.get(f"http://{host}:{p}/")
-        if idx.error:
-            logger.debug("端口 %s 首页抓取失败：%s", p, idx.error)
-            continue
-        _dump_text(f"port{p}_index.html", idx.body, logger)
-        hint = _interface_hint(idx.body or "")
-        if hint:
-            logger.debug("端口 %s 首页里的接口线索：%s", p, hint[:12])
-        if "EPortal" in (idx.body or ""):
-            logger.info("端口 %s 上是 EPortal 单页应用（nginx），真实接口在它引用的 JS 里", p)
-        scripts.update(_fetch_page_scripts(sess, f"http://{host}:{p}", idx.body or "", logger))
-
     app_root = f"http://{host}:{login_port}"
-    # a41.js 是从门户页（80 端口）加载的，而它用**相对路径**加载 a40.js，
-    # 所以 a40.js 很可能在 80 端口 —— 两个端口都要试。
-    for root in dict.fromkeys([app_root, base]):
-        for rel in ("a40.js", "eportal/a40.js",
-                    "eportal/public/pageAsset/js/store.js",
-                    "eportal/public/pageAsset/js/all.js"):
-            u = f"{root}/{rel}"
-            r = sess.get(u)
-            if r.error or not r.body or r.status >= 400:
-                logger.debug("脚本 %s 拉取失败（%s / HTTP %s）",
-                             u, r.error or "-", r.status)
+
+    if diagnose:
+        # 以下全是当初逆向接口时的侦察动作：跑一遍能看清两个端口上分别是什么、
+        # 登录逻辑藏在哪个脚本里。日常登录不必做，纯属浪费往返。
+        #
+        # 实测：801 端口是 nginx 托管的 "EPortal" 单页应用（认证前端），
+        #       80 端口是 DrcomServer1.0 的老接口 —— 两个端口不是同一套系统。
+        # a41.js 里写明真实接口前缀是 http://<host>:801/eportal/portal/
+        for p in dict.fromkeys([login_port, 80]):
+            if not _port_open(host, p):
                 continue
-            _dump_text("app_" + re.sub(r"[^\w.-]", "_", u), r.body, logger)
-            scripts[os.path.basename(rel)] = r.body
-            logger.info("已抓取脚本 %s（%d 字符）", u, len(r.body))
-            for h in _interface_hint(r.body)[:10]:
-                logger.debug("    %s 里的接口线索：%s", rel, h)
+            idx = sess.get(f"http://{host}:{p}/")
+            if idx.error:
+                logger.debug("端口 %s 首页抓取失败：%s", p, idx.error)
+                continue
+            _dump_text(f"port{p}_index.html", idx.body, logger)
+            hint = _interface_hint(idx.body or "")
+            if hint:
+                logger.debug("端口 %s 首页里的接口线索：%s", p, hint[:12])
+            if "EPortal" in (idx.body or ""):
+                logger.info("端口 %s 上是 EPortal 单页应用（nginx），真实接口在它引用的 JS 里", p)
+            scripts.update(_fetch_page_scripts(sess, f"http://{host}:{p}", idx.body or "",
+                                               logger))
+
+        # a41.js 是从门户页（80 端口）加载的，而它用**相对路径**加载 a40.js，
+        # 所以 a40.js 很可能在 80 端口 —— 两个端口都要试。
+        for root in dict.fromkeys([app_root, base]):
+            for rel in ("a40.js", "eportal/a40.js",
+                        "eportal/public/pageAsset/js/store.js",
+                        "eportal/public/pageAsset/js/all.js"):
+                u = f"{root}/{rel}"
+                r = sess.get(u)
+                if r.error or not r.body or r.status >= 400:
+                    logger.debug("脚本 %s 拉取失败（%s / HTTP %s）",
+                                 u, r.error or "-", r.status)
+                    continue
+                _dump_text("app_" + re.sub(r"[^\w.-]", "_", u), r.body, logger)
+                scripts[os.path.basename(rel)] = r.body
+                logger.info("已抓取脚本 %s（%d 字符）", u, len(r.body))
+                for h in _interface_hint(r.body)[:10]:
+                    logger.debug("    %s 里的接口线索：%s", rel, h)
 
     js_blob = "\n".join(scripts.values())
 
@@ -1517,32 +1531,34 @@ def _login_drcom(portal_url, username, password, timeout, enc, logger) -> tuple:
             logger.debug("loadConfig 失败：%s", rc.error)
         else:
             logger.info("loadConfig HTTP %s：%s", rc.status, _html_text(rc.body, 400))
-            _dump_text("drcom_loadConfig.txt", rc.body, logger)
-            # 从返回里取 page_index，拼出页面模板地址并抓下来 ——
-            # 登录表单是 JS 动态生成的，账号/密码字段名只存在于这个模板里。
+            if diagnose:
+                _dump_text("drcom_loadConfig.txt", rc.body, logger)
             try:
                 j = rc.body or ""
-                m_idx = re.search(r'"page_index"\s*:\s*"([^"]+)"', j)
-                m_prg = re.search(r'"program_index"\s*:\s*"([^"]+)"', j)
                 m_mth = re.search(r'"login_method"\s*:\s*"?([^",}]*)"?', j)
                 if m_mth:
                     logger.info("门户告知 login_method=%s", m_mth.group(1))
-                if m_idx and m_prg:
-                    page_url = (f"{app_root}/eportal/extern/"
-                                f"{m_prg.group(1)}/{m_idx.group(1)}/")
-                    for kind in ("pc", "pc_", "pc_1"):
-                        u = f"{page_url}{kind}.js"
-                        rp = sess.get(u)
-                        if rp.error or rp.status >= 400 or not rp.body:
-                            continue
-                        _dump_text(f"template_{kind}.js", rp.body, logger)
-                        logger.info("已抓取页面模板 %s（%d 字符）", u, len(rp.body))
-                        names = sorted(set(re.findall(
-                            r"""\bname\s*=\s*["'\\]*([A-Za-z_][\w.-]{0,30})["'\\]""",
-                            rp.body)))
-                        logger.info("模板里的表单字段名：%s", names[:40])
-                        scripts[f"template_{kind}.js"] = rp.body
-                        break
+                # 登录表单是 JS 动态生成的，账号/密码字段名只存在于页面模板里。
+                # 排障时抓一份很有价值，日常登录则没必要多跑这一趟。
+                if diagnose:
+                    m_idx = re.search(r'"page_index"\s*:\s*"([^"]+)"', j)
+                    m_prg = re.search(r'"program_index"\s*:\s*"([^"]+)"', j)
+                    if m_idx and m_prg:
+                        page_url = (f"{app_root}/eportal/extern/"
+                                    f"{m_prg.group(1)}/{m_idx.group(1)}/")
+                        for kind in ("pc", "pc_", "pc_1"):
+                            u = f"{page_url}{kind}.js"
+                            rp = sess.get(u)
+                            if rp.error or rp.status >= 400 or not rp.body:
+                                continue
+                            _dump_text(f"template_{kind}.js", rp.body, logger)
+                            logger.info("已抓取页面模板 %s（%d 字符）", u, len(rp.body))
+                            names = sorted(set(re.findall(
+                                r"""\bname\s*=\s*["'\\]*([A-Za-z_][\w.-]{0,30})["'\\]""",
+                                rp.body)))
+                            logger.info("模板里的表单字段名：%s", names[:40])
+                            scripts[f"template_{kind}.js"] = rp.body
+                            break
             except Exception as e:                # noqa: BLE001
                 logger.debug("页面模板抓取异常：%s", e)
 
@@ -1639,7 +1655,8 @@ def _login_drcom(portal_url, username, password, timeout, enc, logger) -> tuple:
         logger.debug("  → HTTP %s | Server=%s | %d 字符",
                      r.status, hdrs.get("server", "?"), len(last_body))
         logger.debug("  → 正文摘要：%s", _html_text(last_body, 500))
-        _dump_text(f"login_try_{_mask_secrets(u)}", last_body, logger)
+        if diagnose:
+            _dump_text(f"login_try_{_mask_secrets(u)}", last_body, logger)
         blob = f"{last_body} {r.final_url or ''}"
         low = blob.replace(" ", "").lower()
         if ok_mark in blob or '"result":1' in low or '"result":"success"' in low:
@@ -1808,7 +1825,9 @@ def perform_login(cfg: dict, logger=None, portal_url: str = "") -> tuple:
     if adapter == "eportal":
         return _login_eportal(portal_url, username, password, timeout, enc, logger)
     if adapter == "drcom":
-        return _login_drcom(portal_url, username, password, timeout, enc, logger)
+        return _login_drcom(portal_url, username, password, timeout, enc, logger,
+                            diagnose=bool(cfg.get("advanced", {}).get("diagnose",
+                                                                     False)))
     if adapter == "custom":
         return _login_custom(cfg, username, password, timeout, enc, logger)
     return _login_form(portal_url, username, password, timeout, enc, logger)
@@ -1985,8 +2004,8 @@ def wait_for_network(cfg: dict, logger=None, max_wait: float | None = None) -> b
             logger.info("本机已获得 IP（%s），判定链路就绪（DNS 可能稍后才通），耗时 %d 秒",
                         local_ip() or "-", int(time.time() - t0))
             return True
-        logger.info("网络尚未就绪，5 秒后重试…")
-        time.sleep(5)
+        logger.info("网络尚未就绪，3 秒后重试…")
+        time.sleep(3)
     logger.warning("等待网络就绪超时（%d 秒）", int(limit))
     return False
 

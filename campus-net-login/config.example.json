@@ -39,7 +39,7 @@
 
   "autostart": {
     "enabled": false,
-    "delay": 5,
+    "delay": 2,
     "args": "--silent",
     "hard_retry_seconds": 900,
     "hard_retry_interval": 15
@@ -47,6 +47,7 @@
 
   "advanced": {
     "verify_by_recheck": true,
-    "open_login_page_on_failure": false
+    "open_login_page_on_failure": false,
+    "diagnose": false
   }
 }
