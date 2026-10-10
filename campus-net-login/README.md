@@ -142,7 +142,7 @@ campus-net-login/
 | 字段 | 默认 | 说明 |
 | --- | --- | --- |
 | `enabled` | false | 开关状态（程序维护） |
-| `delay` | 2 | 开机后延迟几秒开始登录（后面还有链路等待兜底，不必设太大） |
+| `delay` | 1 | 开机后延迟几秒开始登录（后面还有链路等待兜底，不必设太大） |
 | `hard_retry_seconds` | 900 | 开机后最长坚持重试多久（秒） |
 | `hard_retry_interval` | 15 | 每轮重试间隔（秒） |
 | `args` | `--silent` | 自启参数。**默认无窗口**，开机静默登录后退出；改成 `--startup` 则开机弹出最小化窗口并常驻守护 |
@@ -247,9 +247,11 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run   项名：Campu
 
 开机后的行为（默认 `--silent`，**全程不弹任何窗口**）：
 
-1. 先等链路就绪（最长 `startup_wait` 秒）。判据是**网卡拿到 IP** 而非 DNS 能解析——
-   开机时 DNS 往往还没起来，按域名判会被误判成"网络不通"；
-2. 延迟 `delay` 秒后开始登录；失败不放弃，每 `hard_retry_interval` 秒再来一轮，
+1. 先等链路就绪（最长 `startup_wait` 秒）。判据是**网卡拿到 IP**，而不是"域名能解析"——
+   开机时 DNS 往往滞后于 DHCP，按域名判会被误判成"网络不通"；网卡还没 IP 时
+   只做轻量轮询（1.5 秒一次），不发无谓的探测请求；
+2. 延迟 `delay` 秒后开始登录。**即使探测点不通也照试不误** —— 登录走的是门户 IP，
+   本就不需要 DNS。失败不放弃，每 `hard_retry_interval` 秒再来一轮，
    直到成功或超过 `hard_retry_seconds`；
 3. 登录成功即**退出，不留后台进程**。
 

@@ -39,7 +39,7 @@
 
   "autostart": {
     "enabled": false,
-    "delay": 2,
+    "delay": 1,
     "args": "--silent",
     "hard_retry_seconds": 900,
     "hard_retry_interval": 15

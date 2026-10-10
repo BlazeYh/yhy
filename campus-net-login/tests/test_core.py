@@ -276,14 +276,38 @@ class TestEngine(unittest.TestCase):
         self.assertEqual(r.attempts, 0)
         m.assert_not_called()
 
-    def test_offline_short_circuits(self):
+    def test_offline_short_circuits_without_ip(self):
+        """连本机 IP 都没有 → 确实是网络不通，直接短路，不发起登录。"""
+        self.cfg["auth"]["login_url"] = "http://10.0.0.1/"
         with mock.patch.object(C, "check_network",
                                return_value=C.NetStatus(C.ST_OFFLINE, "连接超时")), \
-             mock.patch.object(C, "perform_login") as m:
+                mock.patch.object(C, "_has_local_ip", lambda: False), \
+                mock.patch.object(C, "perform_login") as m:
             r = C.connect(self.cfg, self.logger)
         self.assertFalse(r.ok)
         self.assertEqual(r.verdict, C.LoginOutcome.OFFLINE)
         m.assert_not_called()
+
+    def test_offline_but_has_ip_still_tries_login(self):
+        """
+        回归（2026-10-10 用户反馈"有时要干等"）：
+        开机时 DNS 滞后于 DHCP，探测点按域名访问会报"不通"，
+        但网卡已有 IP、门户（内网 IP）可达 —— 登录根本不需要 DNS，
+        不能就此放弃白等一整轮（实测这么白等过 38 秒）。
+        """
+        self.cfg["auth"]["login_url"] = "http://10.0.0.1/"
+        self.cfg["network"]["retry"] = 1          # 只试一轮，避免测试等 6 秒间隔
+        seen = []
+        with mock.patch.object(C, "check_network",
+                               return_value=C.NetStatus(C.ST_OFFLINE, "DNS 解析失败")), \
+                mock.patch.object(C, "_has_local_ip", lambda: True), \
+                mock.patch.object(C, "perform_login",
+                                  side_effect=lambda *a, **k: (
+                                      seen.append(1),
+                                      (C.LoginOutcome.RETRY, "仍不通", ""))[1]):
+            r = C.connect(self.cfg, self.logger)
+        self.assertTrue(seen, "本机有 IP 时，即使探测点不通也必须尝试登录")
+        self.assertFalse(r.ok)
 
     def test_login_success(self):
         seq = [C.NetStatus(C.ST_PORTAL, "需要认证"), C.NetStatus(C.ST_ONLINE, "ok")]

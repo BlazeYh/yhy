@@ -292,7 +292,7 @@ DEFAULT_CONFIG = {
 
     "autostart": {
         "enabled": False,
-        "delay": 2,               # 开机后多久开始尝试（秒）—— 抢时间，别让用户等
+        "delay": 1,               # 开机后多久开始尝试（秒）—— 抢时间，别让用户等
         "args": "--silent",
         "hard_retry_seconds": 900,  # 开机后最长坚持多久（秒）；期间反复重试直到联网
         "hard_retry_interval": 15   # 每轮失败后的间隔（秒）
@@ -1907,12 +1907,20 @@ def connect(cfg: dict, logger=None, force: bool = False) -> ConnectResult:
         return ConnectResult(True, LoginOutcome.OK, "已在线，无需重复登录", st, 0,
                              time.time() - t0)
 
-    if st.state == ST_OFFLINE:
-        logger.warning("网络不通：%s", st.detail)
-        return ConnectResult(False, LoginOutcome.OFFLINE,
-                             f"网络不通：{st.detail}", st, 0, time.time() - t0)
-
     portal_url = st.portal_url or (cfg.get("auth", {}).get("login_url") or "").strip()
+
+    if st.state == ST_OFFLINE:
+        # 开机阶段 DNS 常常滞后于 DHCP：探测点要按域名访问，于是报"不通"，
+        # 可网卡其实已经有 IP、内网门户也能访问 —— 而登录用的正是门户 IP，
+        # 压根不需要 DNS。所以只要「本机有 IP + 有门户地址」就继续尝试，
+        # 不要像以前那样直接放弃、白等一整轮（实测白等过 38 秒）。
+        if _has_local_ip() and portal_url:
+            logger.warning("探测点不通（%s），但本机已获得 IP，仍继续尝试登录"
+                           "（登录走门户 IP，不依赖 DNS）", st.detail)
+        else:
+            logger.warning("网络不通：%s", st.detail)
+            return ConnectResult(False, LoginOutcome.OFFLINE,
+                                 f"网络不通：{st.detail}", st, 0, time.time() - t0)
     net = cfg.get("network", {})
     retry = max(1, int(net.get("retry", 3)))
     wait = float(net.get("retry_interval", 6))
@@ -1996,16 +2004,19 @@ def wait_for_network(cfg: dict, logger=None, max_wait: float | None = None) -> b
     limit = float(net.get("startup_wait", 180) if max_wait is None else max_wait)
     t0 = time.time()
     while time.time() - t0 < limit:
-        st = check_network(cfg, quick=True)
-        if st.state != ST_OFFLINE:
-            logger.info("网络已就绪（%s），耗时 %d 秒", st.text, int(time.time() - t0))
-            return True
+        # 先看网卡拿到 IP 没有。没有的话，探测点必然也连不上，
+        # 没必要浪费一轮请求超时（quick 模式单次最长 8 秒）去试探。
         if _has_local_ip():
-            logger.info("本机已获得 IP（%s），判定链路就绪（DNS 可能稍后才通），耗时 %d 秒",
-                        local_ip() or "-", int(time.time() - t0))
+            st = check_network(cfg, quick=True)
+            if st.state != ST_OFFLINE:
+                logger.info("网络已就绪（%s），耗时 %d 秒", st.text, int(time.time() - t0))
+            else:
+                logger.info("本机已获得 IP（%s），判定链路就绪"
+                            "（探测点暂不通，登录会直接走门户 IP），耗时 %d 秒",
+                            local_ip() or "-", int(time.time() - t0))
             return True
-        logger.info("网络尚未就绪，3 秒后重试…")
-        time.sleep(3)
+        logger.info("网卡尚未获得 IP，1.5 秒后重试…")
+        time.sleep(1.5)
     logger.warning("等待网络就绪超时（%d 秒）", int(limit))
     return False
 

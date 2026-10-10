@@ -1,6 +1,10 @@
 # WorkBuddy 工作区数据（与项目本身无关，不应进仓库）
 .workbuddy/
 
+# 分享给他人用的打包产物
+_share/
+*.zip
+
 # 系统 / 编辑器杂项
 .DS_Store
 Thumbs.db
